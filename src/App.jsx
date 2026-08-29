@@ -71,12 +71,17 @@ const CATEGORIES = [
   "Other",
 ];
 
+const NIGERIAN_STATES = [
+  "Abia","Adamawa","Akwa Ibom","Anambra","Bauchi","Bayelsa","Benue","Borno","Cross River","Delta","Ebonyi","Edo","Ekiti","Enugu","Gombe","Imo","Jigawa","Kaduna","Kano","Katsina","Kebbi","Kogi","Kwara","Lagos","Nasarawa","Niger","Ogun","Ondo","Osun","Oyo","Plateau","Rivers","Sokoto","Taraba","Yobe","Zamfara","Federal Capital Territory"
+];
+
 export default function App() {
   const [loading, setLoading] = useState(true);
   const [catalog, setCatalog] = useState([]);
   const [images, setImages] = useState({});
   const [businesses, setBusinesses] = useState([]);
   const [visitors, setVisitors] = useState([]);
+  const [analytics, setAnalytics] = useState([]);
   const [adminAuth, setAdminAuth] = useState(null);
 
   const [visitor, setVisitor] = useState(null);
@@ -103,26 +108,30 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [bizRes, catRes, visRes, adminRes] = await Promise.all([
+        const [bizRes, catRes, visRes, analyticsRes, adminRes] = await Promise.all([
           safeGet("businesses", true),
           safeGet("catalog", true),
           safeGet("visitors", true),
+          safeGet("analytics-events", true),
           safeGet("platform-admin-auth", true),
         ]);
         const biz = bizRes ? JSON.parse(bizRes.value) : [];
         const cat = catRes ? JSON.parse(catRes.value) : [];
         const vis = visRes ? JSON.parse(visRes.value) : [];
+        const analyticsEvents = analyticsRes ? JSON.parse(analyticsRes.value) : [];
         const admin = adminRes ? JSON.parse(adminRes.value) : null;
         setBusinesses(biz);
         setCatalog(cat);
         setVisitors(vis);
+        setAnalytics(analyticsEvents);
         setAdminAuth(admin);
 
         const imgMap = {};
         await Promise.all(
           cat.map(async (p) => {
             try {
-              const r = Promise.resolve(localStorage.getItem(`img-${p.id}`) ? { value: localStorage.getItem(`img-${p.id}`) } : null);
+              const raw = localStorage.getItem(`img-${p.id}`);
+              const r = raw ? { value: raw } : null;
               if (r) imgMap[p.id] = r.value;
             } catch (e) {
               /* image missing, skip */
@@ -158,7 +167,8 @@ export default function App() {
           await Promise.all(
             missing.map(async (p) => {
               try {
-                const r = Promise.resolve(localStorage.getItem(`img-${p.id}`) ? { value: localStorage.getItem(`img-${p.id}`) } : null);
+                const raw = localStorage.getItem(`img-${p.id}`);
+              const r = raw ? { value: raw } : null;
                 if (r) updates[p.id] = r.value;
               } catch (e) {
                 /* skip */
@@ -220,22 +230,43 @@ export default function App() {
     }
   }
 
+  function trackEvent(type, payload = {}) {
+    const event = {
+      id: uid("e"),
+      type,
+      timestamp: Date.now(),
+      ...payload,
+    };
+    setAnalytics((prev) => {
+      const next = [...prev, event];
+      try { localStorage.setItem("analytics-events", JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  }
+
   // ---- Visitor gate ----
-  async function enterStore(phoneRaw) {
+  async function enterStore(phoneRaw, location = {}) {
     const phone = cleanPhone(phoneRaw);
     if (phone.length < 10) {
       showToast("Enter a valid WhatsApp number to continue.");
+      return;
+    }
+    if (!location.state || !location.city.trim()) {
+      showToast("Select your state and enter your city/town to continue.");
       return;
     }
     const now = Date.now();
     const existing = visitors.find((v) => v.whatsapp === phone);
     let next;
     if (existing) {
-      next = visitors.map((v) => (v.whatsapp === phone ? { ...v, lastVisit: now, visits: v.visits + 1 } : v));
+      const history = Array.isArray(existing.visitHistory) ? existing.visitHistory : [existing.firstVisit, existing.lastVisit].filter(Boolean);
+      history.push(now);
+      next = visitors.map((v) => (v.whatsapp === phone ? { ...v, state: location.state, city: location.city.trim(), lastVisit: now, visits: (v.visits || 0) + 1, visitHistory: history.slice(-100) } : v));
     } else {
-      next = [...visitors, { whatsapp: phone, firstVisit: now, lastVisit: now, visits: 1 }];
+      next = [...visitors, { whatsapp: phone, state: location.state, city: location.city.trim(), firstVisit: now, lastVisit: now, visits: 1, visitHistory: [now] }];
     }
     await saveVisitors(next);
+    trackEvent("marketplace_visit", { visitorWhatsapp: phone, state: location.state, city: location.city.trim() });
     setVisitor(phone);
   }
 
@@ -253,6 +284,7 @@ export default function App() {
           dataUrl,
           name: "",
           category: "",
+          description: "",
           originalPrice: "",
           discountPrice: "",
           qty: "1",
@@ -273,7 +305,7 @@ export default function App() {
     setDrafts((prev) => prev.filter((d) => d.tempId !== tempId));
   }
 
-  async function publishDrafts() {
+  async function publishDrafts(commonDescription = "") {
     if (!currentBusiness) return;
     const invalid = drafts.some(
       (d) => !d.name.trim() || !d.discountPrice || Number(d.discountPrice) <= 0 || !d.qty || Number(d.qty) < 1
@@ -293,6 +325,7 @@ export default function App() {
           sellerId: currentBusiness.id,
           name: d.name.trim(),
           category: d.category.trim(),
+          description: commonDescription.trim(),
           originalPrice: Number(d.originalPrice) || Number(d.discountPrice),
           discountPrice: Number(d.discountPrice),
           qty: Math.max(1, Math.round(Number(d.qty))),
@@ -390,6 +423,19 @@ export default function App() {
     }
   }
 
+  function recordWhatsAppClick(product, business) {
+    if (!business) return;
+    trackEvent("whatsapp_click", {
+      visitorWhatsapp: visitor || "",
+      sellerId: business.id,
+      sellerName: business.businessName,
+      productId: product.id,
+      productName: product.name,
+      state: business.state || "",
+      city: business.city || "",
+    });
+  }
+
   function whatsappLinkForProduct(product, business) {
     const number = cleanPhone(business?.whatsapp);
     const msg =
@@ -404,9 +450,9 @@ export default function App() {
   }
 
   // ---- Business auth ----
-  async function registerBusiness({ businessName, whatsapp, password, category }) {
-    if (!businessName.trim() || !whatsapp.trim() || !password || !category) {
-      showToast("Fill in every field, including a category, to register your business.");
+  async function registerBusiness({ businessName, whatsapp, password, category, state, city }) {
+    if (!businessName.trim() || !whatsapp.trim() || !password || !category || !state || !city?.trim()) {
+      showToast("Fill in all fields, including category and location, to register your business.");
       return;
     }
     const phone = cleanPhone(whatsapp);
@@ -414,7 +460,7 @@ export default function App() {
       showToast("That WhatsApp number is already registered — log in instead.");
       return;
     }
-    const biz = { id: uid("b"), businessName: businessName.trim(), whatsapp: phone, password, category, createdAt: Date.now() };
+    const biz = { id: uid("b"), businessName: businessName.trim(), whatsapp: phone, password, category, state, city: city.trim(), createdAt: Date.now() };
     const next = [...businesses, biz];
     try {
       Promise.resolve(localStorage.setItem("businesses", JSON.stringify(next)));
@@ -578,13 +624,16 @@ export default function App() {
               </button>
             </div>
           ) : (
-            <button
-              onClick={() => setModal("business-auth")}
-              className="text-sm font-semibold px-3 py-2 rounded-lg shrink-0"
-              style={{ background: AMBER, color: NAVY }}
-            >
-              Post your products
-            </button>
+            <div className="flex flex-col items-end shrink-0 leading-tight">
+              <button
+                onClick={() => setModal("business-auth")}
+                className="text-sm font-semibold px-3 py-2 rounded-lg"
+                style={{ background: AMBER, color: NAVY }}
+              >
+                Post your products
+              </button>
+              <span className="text-[10px] text-white/75 mt-1 hidden sm:block">Post your products so thousands of Nigerians can see</span>
+            </div>
           )}
         </div>
         {currentBusiness && (
@@ -614,6 +663,8 @@ export default function App() {
           onDelete={deleteProduct}
           onCopyBroadcast={copyBroadcast}
           onPersist={persistCatalog}
+          analytics={analytics}
+          sellerId={currentBusiness?.id}
         />
       ) : view === "admin" && isAdmin ? (
         <AdminDashboard
@@ -621,6 +672,7 @@ export default function App() {
           businesses={businesses}
           catalog={catalog}
           whatsappLinkPlain={whatsappLinkPlain}
+          analytics={analytics}
           onRemoveBusiness={removeBusiness}
         />
       ) : !visitor ? (
@@ -631,6 +683,7 @@ export default function App() {
           images={images}
           businessMap={businessMap}
           whatsappLink={whatsappLinkForProduct}
+          onWhatsAppClick={recordWhatsAppClick}
           searchActive={!!search}
           page={page}
           setPage={setPage}
@@ -666,38 +719,34 @@ export default function App() {
 
 function VisitorGate({ onEnter }) {
   const [phone, setPhone] = useState("");
+  const [state, setState] = useState("");
+  const [city, setCity] = useState("");
   return (
-    <div className="max-w-sm mx-auto text-center py-16 px-6">
+    <div className="max-w-sm mx-auto text-center py-12 px-6">
       <div style={{ background: AMBER }} className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 rotate-[-6deg]">
         <Phone size={24} color={NAVY} />
       </div>
-      <h2 className="slasha-display text-lg font-bold text-gray-800 mb-2">Enter your WhatsApp number</h2>
-      <p className="text-sm text-gray-500 mb-5">
-        No account or password needed — just your WhatsApp number, so sellers can reply to you when you buy.
-      </p>
-      <input
-        value={phone}
-        onChange={(e) => setPhone(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onEnter(phone)}
-        placeholder="e.g. 2348012345678"
-        className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm mb-3 outline-none focus:border-gray-500 text-center"
-      />
-      <button
-        onClick={() => onEnter(phone)}
-        style={{ background: GREEN }}
-        className="w-full py-2.5 rounded-lg text-white font-semibold text-sm"
-      >
-        View products
-      </button>
+      <h2 className="slasha-display text-lg font-bold text-gray-800 mb-2">Enter your details to view Slasha</h2>
+      <p className="text-sm text-gray-500 mb-5">No account or password needed. Your WhatsApp number and location help sellers and Slasha understand where shoppers are coming from.</p>
+      <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="WhatsApp e.g. 2348012345678" className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm mb-3 outline-none focus:border-gray-500 text-center" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+        <select value={state} onChange={(e) => setState(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-500">
+          <option value="">Select state</option>
+          {NIGERIAN_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <input value={city} onChange={(e) => setCity(e.target.value)} placeholder="City / Town" className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-500" />
+      </div>
+      <button onClick={() => onEnter(phone, { state, city })} style={{ background: GREEN }} className="w-full py-2.5 rounded-lg text-white font-semibold text-sm">View products</button>
     </div>
   );
 }
+
 
 const PAGE_SIZE = 10;
 
 function BuyerView({
   products, images, businessMap, whatsappLink, searchActive,
-  page, setPage, categories, categoryFilter, onCategoryChange,
+  page, setPage, categories, categoryFilter, onCategoryChange, onWhatsAppClick,
 }) {
   const categoryBar = categories && categories.length > 0 && (
     <div className="max-w-6xl mx-auto px-4 pt-4 flex flex-wrap gap-2">
@@ -763,6 +812,7 @@ function BuyerView({
               image={images[p.id]}
               business={businessMap[p.sellerId]}
               whatsappLink={whatsappLink}
+              onWhatsAppClick={onWhatsAppClick}
             />
           ))}
         </div>
@@ -796,7 +846,7 @@ function BuyerView({
   );
 }
 
-function ProductCard({ product, image, business, whatsappLink }) {
+function ProductCard({ product, image, business, whatsappLink, onWhatsAppClick }) {
   const pct =
     product.originalPrice > product.discountPrice
       ? Math.round((1 - product.discountPrice / product.originalPrice) * 100)
@@ -828,6 +878,8 @@ function ProductCard({ product, image, business, whatsappLink }) {
       <div className="p-3 flex-1 flex flex-col">
         {business && <p className="text-[11px] text-gray-400 mb-0.5 truncate">{business.businessName}</p>}
         <p className="font-semibold text-sm text-gray-800 leading-snug line-clamp-2">{product.name}</p>
+        {product.description && <p className="text-xs text-gray-500 mt-1 line-clamp-3">{product.description}</p>}
+        {business?.city && business?.state && <p className="text-[11px] text-gray-400 mt-1">{business.city}, {business.state}</p>}
         <div className="flex items-center gap-2 mt-1">
           {product.originalPrice > product.discountPrice && (
             <span className="text-xs text-gray-400 line-through">{money(product.originalPrice)}</span>
@@ -840,6 +892,7 @@ function ProductCard({ product, image, business, whatsappLink }) {
 
       <a
         href={whatsappLink(product, business)}
+        onClick={() => onWhatsAppClick?.(product, business)}
         target="_blank"
         rel="noopener noreferrer"
         style={{ background: GREEN }}
@@ -855,16 +908,23 @@ function SellerDashboard(props) {
   const {
     catalog, images, drafts, publishing, lowStockCount, fileInputRef,
     onFiles, onUpdateDraft, onRemoveDraft, onPublish, onEditField, onCommitField,
-    onAdjustQty, onDelete, onCopyBroadcast, onPersist,
+    onAdjustQty, onDelete, onCopyBroadcast, onPersist, analytics = [],
   } = props;
 
   const [dragOver, setDragOver] = useState(false);
+  const [commonDescription, setCommonDescription] = useState("");
+  const mySellerId = props.sellerId || props.catalog?.[0]?.sellerId;
+  const myClicks = analytics.filter((e) => e.type === "whatsapp_click" && e.sellerId === mySellerId).length;
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="grid grid-cols-2 gap-3 mb-6">
         <StatCard icon={<Package size={16} />} label="Products live" value={catalog.length} />
         <StatCard icon={<AlertTriangle size={16} />} label="Low stock" value={lowStockCount} tone="amber" />
+      </div>
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <StatCard icon={<MessageCircle size={16} />} label="WhatsApp clicks" value={myClicks} tone="green" />
+        <StatCard icon={<Users size={16} />} label="Visitors" value={new Set(analytics.filter((e) => e.type === "whatsapp_click" && e.sellerId === mySellerId && e.visitorWhatsapp).map((e) => e.visitorWhatsapp)).size} />
       </div>
 
       <p className="text-xs text-gray-500 mb-4 bg-gray-100 rounded-lg px-3 py-2">
@@ -912,13 +972,24 @@ function SellerDashboard(props) {
               {drafts.length} photo{drafts.length > 1 ? "s" : ""} ready — add details
             </h3>
           </div>
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-gray-600 block mb-1">Description for all these products (optional)</label>
+            <textarea
+              value={commonDescription}
+              onChange={(e) => setCommonDescription(e.target.value)}
+              placeholder="Write one description to apply to every product in this upload..."
+              rows={3}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-500"
+            />
+            <p className="text-[11px] text-gray-400 mt-1">One description will be attached to all {drafts.length} products in this upload.</p>
+          </div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {drafts.map((d) => (
               <DraftCard key={d.tempId} draft={d} onUpdate={onUpdateDraft} onRemove={onRemoveDraft} />
             ))}
           </div>
           <button
-            onClick={onPublish}
+            onClick={() => onPublish(commonDescription)}
             disabled={publishing}
             style={{ background: RED }}
             className="mt-4 w-full sm:w-auto px-5 py-2.5 rounded-lg text-white font-semibold text-sm disabled:opacity-60"
@@ -961,8 +1032,8 @@ function SellerDashboard(props) {
 }
 
 function StatCard({ icon, label, value, tone }) {
-  const bg = tone === "amber" ? "#FFF7E6" : "#F5F6FA";
-  const fg = tone === "amber" ? "#B45309" : NAVY;
+  const bg = tone === "amber" ? "#FFF7E6" : tone === "green" ? "#ECFDF3" : "#F5F6FA";
+  const fg = tone === "amber" ? "#B45309" : tone === "green" ? "#15803D" : NAVY;
   return (
     <div className="rounded-xl p-3" style={{ background: bg }}>
       <div className="flex items-center gap-1.5 text-xs font-medium mb-1" style={{ color: fg }}>
@@ -1049,8 +1120,9 @@ function ProductRow({ product, image, onEditField, onCommitField, onAdjustQty, o
         className="text-sm font-semibold border-b border-transparent hover:border-gray-200 focus:border-gray-400 outline-none flex-1 min-w-[120px] bg-transparent"
       />
 
+      {product.description && <p className="w-full text-xs text-gray-500 truncate">{product.description}</p>}
+
       <div className="flex items-center gap-1">
-        <label className="text-[11px] text-gray-400">Orig.</label>
         <input
           type="number"
           min="0"
@@ -1091,103 +1163,47 @@ function ProductRow({ product, image, onEditField, onCommitField, onAdjustQty, o
   );
 }
 
-function AdminDashboard({ visitors, businesses, catalog, whatsappLinkPlain, onRemoveBusiness }) {
-  const [tab, setTab] = useState("visitors");
+function AdminDashboard({ visitors, businesses, catalog, whatsappLinkPlain, analytics = [], onRemoveBusiness }) {
+  const [tab, setTab] = useState("overview");
   const sortedVisitors = [...visitors].sort((a, b) => b.lastVisit - a.lastVisit);
   const sortedBusinesses = [...businesses].sort((a, b) => b.createdAt - a.createdAt);
+  const whatsappClicks = analytics.filter((e) => e.type === "whatsapp_click");
+  const totalVisits = analytics.filter((e) => e.type === "marketplace_visit").length;
+  const uniqueVisitors = new Set(visitors.map((v) => v.whatsapp)).size;
+  const locationCounts = {};
+  [...visitors].forEach((v) => { const key = [v.city, v.state].filter(Boolean).join(", ") || "Unknown"; locationCounts[key] = (locationCounts[key] || 0) + 1; });
+  const sellerClicks = {};
+  whatsappClicks.forEach((e) => { sellerClicks[e.sellerId] = (sellerClicks[e.sellerId] || 0) + 1; });
+  const topLocations = Object.entries(locationCounts).sort((a,b) => b[1]-a[1]).slice(0,10);
+
+  function avgVisitGap(v) {
+    const h = Array.isArray(v.visitHistory) ? [...v.visitHistory].sort((a,b)=>a-b) : [];
+    if (h.length < 2) return "First visit";
+    const gaps = h.slice(1).map((t,i) => t - h[i]);
+    const avg = gaps.reduce((a,b)=>a+b,0) / gaps.length / 86400000;
+    return avg < 1 ? `${Math.round(avg*24)} hrs` : `${avg.toFixed(1)} days`;
+  }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-6">
-      <div className="flex items-center gap-2 mb-2">
-        <ShieldCheck size={18} style={{ color: NAVY }} />
-        <h2 className="slasha-display font-bold text-gray-800 text-lg">Platform admin</h2>
+    <div className="max-w-6xl mx-auto px-4 py-6">
+      <div className="flex items-center gap-2 mb-2"><ShieldCheck size={18} style={{ color: NAVY }} /><h2 className="slasha-display font-bold text-gray-800 text-lg">Platform admin analytics</h2></div>
+      <p className="text-sm text-gray-500 mb-5">See marketplace visits, visitor locations, businesses, product activity and WhatsApp enquiries.</p>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+        <StatCard icon={<Users size={16} />} label="Unique visitors" value={uniqueVisitors} />
+        <StatCard icon={<Users size={16} />} label="Total visits" value={totalVisits} />
+        <StatCard icon={<MessageCircle size={16} />} label="WhatsApp clicks" value={whatsappClicks.length} tone="green" />
+        <StatCard icon={<Store size={16} />} label="Businesses" value={businesses.length} />
       </div>
-      <p className="text-sm text-gray-500 mb-5">Monitor everyone who visits your marketplace and every business selling on it.</p>
-
-      <div className="flex gap-2 mb-4">
-        <button
-          onClick={() => setTab("visitors")}
-          className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === "visitors" ? "text-white" : "bg-white border border-gray-300 text-gray-600"}`}
-          style={tab === "visitors" ? { background: NAVY } : {}}
-        >
-          Visitors ({visitors.length})
-        </button>
-        <button
-          onClick={() => setTab("businesses")}
-          className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === "businesses" ? "text-white" : "bg-white border border-gray-300 text-gray-600"}`}
-          style={tab === "businesses" ? { background: NAVY } : {}}
-        >
-          Businesses ({businesses.length})
-        </button>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {[['overview','Overview'],['visitors','Visitors'],['businesses','Businesses'],['locations','Locations']].map(([key,label]) => <button key={key} onClick={() => setTab(key)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === key ? 'text-white' : 'bg-white border border-gray-300 text-gray-600'}`} style={tab === key ? {background:NAVY} : {}}>{label}</button>)}
       </div>
-
-      {tab === "visitors" ? (
-        sortedVisitors.length === 0 ? (
-          <EmptyAdmin icon={<Users size={32} />} text="No visitors have entered the marketplace yet." />
-        ) : (
-          <div className="space-y-2">
-            {sortedVisitors.map((v) => (
-              <div key={v.whatsapp} className="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0">
-                  <Phone size={15} className="text-gray-500" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-800">{v.whatsapp}</p>
-                  <p className="text-xs text-gray-500">
-                    {v.visits} visit{v.visits > 1 ? "s" : ""} · first {fmtDate(v.firstVisit)} · last {fmtDate(v.lastVisit)}
-                  </p>
-                </div>
-                <a
-                  href={whatsappLinkPlain(v.whatsapp, "Hi! Thanks for checking out Slasha — let us know if you need help finding a deal.")}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ background: GREEN }}
-                  className="text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shrink-0"
-                >
-                  <MessageCircle size={13} /> Message
-                </a>
-              </div>
-            ))}
-          </div>
-        )
-      ) : sortedBusinesses.length === 0 ? (
-        <EmptyAdmin icon={<Store size={32} />} text="No businesses have registered yet." />
-      ) : (
-        <div className="space-y-2">
-          {sortedBusinesses.map((b) => {
-            const count = catalog.filter((p) => p.sellerId === b.id).length;
-            return (
-              <div key={b.id} className="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0">
-                  <Store size={15} className="text-gray-500" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-800 truncate">{b.businessName}</p>
-                  <p className="text-xs text-gray-500">
-                    {b.whatsapp} · {count} product{count === 1 ? "" : "s"} live · joined {fmtDate(b.createdAt)}
-                  </p>
-                </div>
-                <a
-                  href={whatsappLinkPlain(b.whatsapp, `Hi ${b.businessName}, this is the Slasha team reaching out.`)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ background: GREEN }}
-                  className="text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shrink-0"
-                >
-                  <MessageCircle size={13} /> Message
-                </a>
-                <button
-                  onClick={() => onRemoveBusiness(b.id)}
-                  className="w-8 h-8 rounded-md flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 shrink-0"
-                  title="Remove business"
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {tab === "overview" && <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-white border border-gray-200 rounded-xl p-4"><h3 className="font-bold text-gray-800 mb-3">Top visitor locations</h3>{topLocations.length ? topLocations.map(([loc,n]) => <div key={loc} className="flex justify-between py-2 border-b last:border-0 text-sm"><span>{loc}</span><strong>{n}</strong></div>) : <p className="text-sm text-gray-400">No location data yet.</p>}</div>
+        <div className="bg-white border border-gray-200 rounded-xl p-4"><h3 className="font-bold text-gray-800 mb-3">Businesses by WhatsApp clicks</h3>{sortedBusinesses.slice(0,10).map((b) => <div key={b.id} className="flex justify-between py-2 border-b last:border-0 text-sm"><span className="truncate pr-3">{b.businessName}</span><strong>{sellerClicks[b.id] || 0}</strong></div>)}</div>
+      </div>}
+      {tab === "locations" && <div className="bg-white border border-gray-200 rounded-xl p-4"><h3 className="font-bold text-gray-800 mb-3">Visitor locations</h3>{topLocations.length ? topLocations.map(([loc,n]) => <div key={loc} className="flex justify-between py-2 border-b last:border-0 text-sm"><span>{loc}</span><strong>{n} visitor{n===1?'':'s'}</strong></div>) : <p className="text-sm text-gray-400">No location data yet.</p>}</div>}
+      {tab === "visitors" && (sortedVisitors.length === 0 ? <EmptyAdmin icon={<Users size={32} />} text="No visitors have entered the marketplace yet." /> : <div className="space-y-2">{sortedVisitors.map((v) => <div key={v.whatsapp} className="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3"><div className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0"><Phone size={15} className="text-gray-500" /></div><div className="flex-1 min-w-0"><p className="text-sm font-semibold text-gray-800">{v.whatsapp}</p><p className="text-xs text-gray-500">{v.visits} visit{v.visits > 1 ? 's' : ''} · {v.city}, {v.state} · first {fmtDate(v.firstVisit)} · last {fmtDate(v.lastVisit)} · every {avgVisitGap(v)}</p></div><a href={whatsappLinkPlain(v.whatsapp, 'Hi! Thanks for checking out Slasha — let us know if you need help finding a deal.')} target="_blank" rel="noopener noreferrer" style={{background:GREEN}} className="text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shrink-0"><MessageCircle size={13}/> Message</a></div>)}</div>)}
+      {tab === "businesses" && (sortedBusinesses.length === 0 ? <EmptyAdmin icon={<Store size={32} />} text="No businesses have registered yet." /> : <div className="space-y-2">{sortedBusinesses.map((b) => { const count = catalog.filter((p)=>p.sellerId===b.id).length; return <div key={b.id} className="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3"><div className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0"><Store size={15} className="text-gray-500" /></div><div className="flex-1 min-w-0"><p className="text-sm font-semibold text-gray-800 truncate">{b.businessName}</p><p className="text-xs text-gray-500">{b.whatsapp} · {b.city}, {b.state} · {count} product{count === 1 ? '' : 's'} live · {sellerClicks[b.id] || 0} WhatsApp clicks · joined {fmtDate(b.createdAt)}</p></div><a href={whatsappLinkPlain(b.whatsapp, `Hi ${b.businessName}, this is the Slasha team reaching out.`)} target="_blank" rel="noopener noreferrer" style={{background:GREEN}} className="text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shrink-0"><MessageCircle size={13}/> Message</a><button onClick={()=>onRemoveBusiness(b.id)} className="w-8 h-8 rounded-md flex items-center justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 shrink-0" title="Remove business"><Trash2 size={15}/></button></div>})}</div>)}
     </div>
   );
 }
@@ -1207,88 +1223,42 @@ function BusinessAuthModal({ onClose, onRegister, onLogin }) {
   const [whatsapp, setWhatsapp] = useState("");
   const [password, setPassword] = useState("");
   const [category, setCategory] = useState("");
+  const [state, setState] = useState("");
+  const [city, setCity] = useState("");
 
   return (
     <ModalShell onClose={onClose} title="Post your products" icon={<Store size={18} />}>
-      <p className="text-sm text-gray-500 mb-4">
-        Thousands of Nigerians visit and see your products every day. Register your business to post photos and start getting orders on WhatsApp.
-      </p>
+      <p className="text-sm font-semibold text-gray-700 mb-1">Post your products so thousands of Nigerians can see</p>
+      <p className="text-sm text-gray-500 mb-4">Register your business to post photos and start getting orders on WhatsApp.</p>
       <div className="flex gap-2 mb-4">
-        <button
-          onClick={() => setTab("register")}
-          className={`flex-1 py-1.5 rounded-lg text-sm font-semibold ${tab === "register" ? "text-white" : "bg-gray-100 text-gray-600"}`}
-          style={tab === "register" ? { background: RED } : {}}
-        >
-          Register
-        </button>
-        <button
-          onClick={() => setTab("login")}
-          className={`flex-1 py-1.5 rounded-lg text-sm font-semibold ${tab === "login" ? "text-white" : "bg-gray-100 text-gray-600"}`}
-          style={tab === "login" ? { background: RED } : {}}
-        >
-          Log in
-        </button>
+        <button onClick={() => setTab("register")} className={`flex-1 py-1.5 rounded-lg text-sm font-semibold ${tab === "register" ? "text-white" : "bg-gray-100 text-gray-600"}`} style={tab === "register" ? { background: RED } : {}}>Register</button>
+        <button onClick={() => setTab("login")} className={`flex-1 py-1.5 rounded-lg text-sm font-semibold ${tab === "login" ? "text-white" : "bg-gray-100 text-gray-600"}`} style={tab === "login" ? { background: RED } : {}}>Log in</button>
       </div>
-
-      {tab === "register" && (
+      {tab === "register" && <>
         <FieldLabel>Business name</FieldLabel>
-      )}
-      {tab === "register" && (
-        <input
-          value={businessName}
-          onChange={(e) => setBusinessName(e.target.value)}
-          placeholder="e.g. Ada's Fashion Hub"
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-gray-500"
-        />
-      )}
-
+        <input value={businessName} onChange={(e) => setBusinessName(e.target.value)} placeholder="e.g. Ada's Fashion Hub" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-gray-500" />
+      </>}
       <FieldLabel>WhatsApp number (with country code)</FieldLabel>
-      <input
-        value={whatsapp}
-        onChange={(e) => setWhatsapp(e.target.value)}
-        placeholder="e.g. 2348012345678"
-        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-gray-500"
-      />
-      <FieldLabel>Password</FieldLabel>
-      <input
-        type="password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        placeholder={tab === "register" ? "Create a password" : "Your password"}
-        onKeyDown={(e) =>
-          e.key === "Enter" &&
-          (tab === "register" ? onRegister({ businessName, whatsapp, password, category }) : onLogin({ whatsapp, password }))
-        }
-        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 outline-none focus:border-gray-500"
-      />
-      {tab === "register" && (
-        <>
-          <FieldLabel>Business category</FieldLabel>
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-gray-500"
-          >
-            <option value="">Select a category</option>
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+      <input value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} placeholder="e.g. 2348012345678" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-gray-500" />
+      {tab === "register" && <>
+        <FieldLabel>Business category</FieldLabel>
+        <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 outline-none focus:border-gray-500">
+          <option value="">Select a category</option>
+          {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <FieldLabel>Business location</FieldLabel>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+          <select value={state} onChange={(e) => setState(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-500">
+            <option value="">Select state</option>
+            {NIGERIAN_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
-        </>
-      )}
-
-      {tab === "register" && (
-        <p className="text-xs text-gray-400 mb-3">
-          This marketplace stores your details to run your store, and your product list is visible to every visitor.
-        </p>
-      )}
-      <button
-        onClick={() =>
-          tab === "register" ? onRegister({ businessName, whatsapp, password, category }) : onLogin({ whatsapp, password })
-        }
-        style={{ background: RED }}
-        className="w-full py-2.5 rounded-lg text-white font-semibold text-sm"
-      >
-        {tab === "register" ? "Create my store" : "Log in"}
-      </button>
+          <input value={city} onChange={(e) => setCity(e.target.value)} placeholder="City / Town" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-500" />
+        </div>
+      </>}
+      <FieldLabel>Password</FieldLabel>
+      <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={tab === "register" ? "Create a password" : "Your password"} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 outline-none focus:border-gray-500" />
+      {tab === "register" && <p className="text-xs text-gray-400 mb-3">Your location is used for marketplace analytics and to help shoppers know where sellers are based.</p>}
+      <button onClick={() => tab === "register" ? onRegister({ businessName, whatsapp, password, category, state, city }) : onLogin({ whatsapp, password })} style={{ background: RED }} className="w-full py-2.5 rounded-lg text-white font-semibold text-sm">{tab === "register" ? "Create my store" : "Log in"}</button>
     </ModalShell>
   );
 }
