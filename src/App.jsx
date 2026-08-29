@@ -300,7 +300,7 @@ export default function App() {
         });
       }
       const merged = [...newProducts, ...catalog];
-      await window.storage.set("catalog", JSON.stringify(merged), true);
+      localStorage.setItem("catalog", JSON.stringify(merged));
       setCatalog(merged);
       setImages((prev) => {
         const copy = { ...prev };
